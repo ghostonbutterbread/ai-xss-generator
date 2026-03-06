@@ -1,6 +1,8 @@
 import unittest
+from io import StringIO
+from contextlib import redirect_stdout
 
-from ai_xss_generator.cli import build_parser
+from ai_xss_generator.cli import build_parser, main
 from ai_xss_generator.config import DEFAULT_MODEL
 
 
@@ -20,9 +22,25 @@ class CliHelpTest(unittest.TestCase):
         self.assertIn("-j, --json-out PATH", help_text)
         self.assertIn("-v, --verbose", help_text)
         self.assertIn("--merge-batch", help_text)
+        self.assertIn("--public", help_text)
+        self.assertIn("--bypass BYPASS", help_text)
+        self.assertIn("--waf WAF", help_text)
         self.assertIn("-V, --version", help_text)
         self.assertNotIn("--html", help_text)
         self.assertNotIn("(default: None)", help_text)
+
+    def test_main_help_exits_cleanly(self) -> None:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                main(["--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("usage: axss", help_text)
+        self.assertIn("options:", help_text)
+        self.assertIn("-u, --url TARGET", help_text)
+        self.assertIn("--public", help_text)
 
 
 if __name__ == "__main__":

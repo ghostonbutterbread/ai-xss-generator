@@ -120,6 +120,21 @@ def build_parser(config_default_model: str) -> argparse.ArgumentParser:
         action="store_true",
         help="--merge-batch (combine batch contexts into one payload set), e.g. --urls urls.txt --merge-batch",
     )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help="Include public payloads",
+    )
+    parser.add_argument(
+        "--bypass",
+        type=str,
+        help="Payload string to obfuscate/mutate",
+    )
+    parser.add_argument(
+        "--waf",
+        type=str,
+        help="WAF Name (e.g. akamai, cloudflare)",
+    )
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -350,4 +365,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-import argparse\nparser = argparse.ArgumentParser()\nparser.add_argument('--public', action='store_true', help='Include public payloads')\nparser.add_argument('--bypass', type=str, help='Payload string to obfuscate/mutate')\nparser.add_argument('--waf', type=str, help='WAF Name (e.g. akamai, cloudflare)')\nargs = parser.parse_args()
+import argparse\nparser = argparse.ArgumentParser()\nparser.add_argument('--public', action='store_true', help='Include public payloads')\nparser.add_argument('--bypass', type=str, help='Payload string to obfuscate/mutate')\nparser.add_argument('--waf', type=str, help='WAF Name (e.g. akamai, cloudflare)')\nargs = parser.parse_args()\n

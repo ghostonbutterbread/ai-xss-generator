@@ -11,8 +11,8 @@ from urllib.parse import quote_plus
 
 import requests
 
-from ai_xss_generator.payloads import base_payloads_for_context, rank_payloads
-from ai_xss_generator.types import ParsedContext, PayloadCandidate
+from ai_xss_generator.payloads import base_payloads_for_context, payloads_for_options, rank_payloads
+from ai_xss_generator.types import ParsedContext, PayloadCandidate, PayloadGenerationOptions
 
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
@@ -277,13 +277,16 @@ def _apply_mutators(
 def generate_payloads(
     context: ParsedContext,
     model: str,
+    options: PayloadGenerationOptions | None = None,
     mutator_plugins: list[Any] | None = None,
     progress: Any | None = None,
 ) -> tuple[list[PayloadCandidate], str, bool, str]:
+    options = options or PayloadGenerationOptions()
     mutator_plugins = mutator_plugins or []
     if progress is not None:
         progress("Generating payloads...")
     heuristics = base_payloads_for_context(context)
+    option_payloads = payloads_for_options(context, options)
     engine = "heuristic"
     used_fallback = True
     resolved_model = model
@@ -304,7 +307,7 @@ def generate_payloads(
             used_fallback = True
             resolved_model = model
 
-    combined = heuristics + ai_payloads
+    combined = heuristics + option_payloads + ai_payloads
     if progress is not None:
         progress("Ranking/mutating...")
     combined = _apply_mutators(combined, context, mutator_plugins)
@@ -318,14 +321,17 @@ def generate_payloads(
         ]
         ranked = sorted(ranked, key=lambda item: (-item.risk_score, item.payload))
     return ranked, engine, used_fallback, resolved_model
-if args.public: print('public')
-from jsbeautifier import beautify\nimport base64
-def js_escape(payload: str): 
-    return ''.join(f'\x{ord(c):02x}' for c in payload) #simple escape
+if args.public:
+   print('public payloads')
+if args.bypass:
+    from jsbeautifier import beautify
+    import base64
+
+    def js_escape(payload: str): 
+         return ''.join(f'\x{ord(c):02x}' for c in payload) #simple escape
 
 
-
-def url_encode(payload: str) -> str:
-    return quote_plus(payload)
-
-
+    def url_encode(payload: str) -> str:
+        return quote_plus(payload)
+    print (args.bypass)
+if args.waf: print(args.waf)

@@ -72,6 +72,13 @@ class PayloadCandidate:
 
 
 @dataclass(slots=True)
+class PayloadGenerationOptions:
+    public: bool = False
+    bypass: str = ""
+    waf: str = ""
+
+
+@dataclass(slots=True)
 class GenerationResult:
     engine: str
     model: str

