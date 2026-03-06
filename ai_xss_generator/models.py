@@ -318,3 +318,14 @@ def generate_payloads(
         ]
         ranked = sorted(ranked, key=lambda item: (-item.risk_score, item.payload))
     return ranked, engine, used_fallback, resolved_model
+if args.public: print('public')
+from jsbeautifier import beautify\nimport base64
+def js_escape(payload: str): 
+    return ''.join(f'\x{ord(c):02x}' for c in payload) #simple escape
+
+
+
+def url_encode(payload: str) -> str:
+    return quote_plus(payload)
+
+
